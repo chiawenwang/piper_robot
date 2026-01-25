@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# bash can_activate.sh can0 1000000 '1-5:1.0'
+
+
 # 默认的 CAN 名称，用户可以通过命令行参数设定
 DEFAULT_CAN_NAME="${1:-can0}"
 

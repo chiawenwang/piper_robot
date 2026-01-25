@@ -341,3 +341,5 @@ if __name__ == "__main__":
     arm.enable()
     # arm.gripper_enable()
     time.sleep(0.1)  # 等待使能完成
+
+    arm.goto_home(speed=50, gripper_m=arm.gripper_close_m)
