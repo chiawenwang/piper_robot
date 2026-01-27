@@ -329,11 +329,53 @@ class PiperArmController:
         else:
             print("Switched to CAN control mode.")
 
+    def set_ctrl_mode2can(self):
+        """
+        切换机械臂到can控制模式
+        """
+        print(f"当前机械臂状态为{self.piper.GetArmStatus().arm_status.ctrl_mode}")
+
+        if self.piper.GetArmStatus().arm_status.ctrl_mode == 0x00:#如果是待机
+            print("尝试从 待机模式->can控制模式")
+            self.piper.MotionCtrl_2(0x01, 0x00, 100, 0x00)#设置can模式
+            print(self.piper.GetArmStatus().arm_status.ctrl_mode)
+            time.sleep(1)
+            print(self.piper.GetArmStatus().arm_status.ctrl_mode)
+        elif self.piper.GetArmStatus().arm_status.ctrl_mode == 0x02:#如果是示教模式
+            print("尝试从 示教模式->can控制模式")
+            self.piper.MotionCtrl_1(0x02,0,0)#恢复，示教模式->待机模式
+            # print(piper.GetArmStatus().arm_status.ctrl_mode)
+            time.sleep(1)#这里必须要等切换到待机模式
+            # print(piper.GetArmStatus().arm_status.ctrl_mode)
+
+            self.piper.MotionCtrl_2(0x01, 0x00, 100, 0x00)#设置can模式
+            time.sleep(1)#这里也必须要等
+
+            while( not self.piper.EnablePiper()):#使能机械臂
+                time.sleep(0.01)
+
+            self.piper.MotionCtrl_2(0x01, 0x00, 100, 0x00)#设置can模式
+            while(self.piper.GetArmStatus().arm_status.ctrl_mode != 0x01):#等待进入can控制模式
+                time.sleep(0.01)
+            print("成功切换到can控制模式")
+
+
+        elif self.piper.GetArmStatus().arm_status.ctrl_mode == 0x01:#如果是can控制模式
+            print("can控制模式") 
+            while( not self.piper.EnablePiper()):#使能机械臂
+                time.sleep(0.01)
+            
+        else:
+            print(self.piper.GetArmStatus().arm_status.ctrl_mode)
+        #清除夹爪错误使其可以被正常控制
+        self.piper.GripperCtrl(0,1000,0x02, 0)
+        self.piper.GripperCtrl(0,1000,0x01, 0)
+
 if __name__ == "__main__":
     arm = PiperArmController(
         can_name="can0",
         home_joints_rad=[0.0, 0.866, -0.960, 0.0, 0.182, 1.571],
-        gripper_open_m=0.05,
+        gripper_open_m=0.03,
         gripper_close_m=0.00,
     )
 
@@ -342,4 +384,36 @@ if __name__ == "__main__":
     # arm.gripper_enable()
     time.sleep(0.1)  # 等待使能完成
 
-    arm.goto_home(speed=50, gripper_m=arm.gripper_close_m)
+    arm.gripper_enable()
+
+    # print("Current control mode:", arm.get_ctrl_mode_str())
+    # print('status:', arm.status)
+
+    # arm.set_ctrl_mode2can()
+
+    arm.update()
+    cur_joint = arm.joint_rad
+    print("Current joints (rad):", cur_joint)
+    cur_pose = arm.end_pose
+    print("Current pose:", cur_pose)
+
+    time.sleep(0.5)
+
+    arm.gripper_open()
+
+    exit()
+
+    arm.move_end_pose(
+        EndPose(
+            x_mm=cur_pose.x_mm,
+            y_mm=cur_pose.y_mm,
+            z_mm=cur_pose.z_mm + 50.0,
+            rx_deg=cur_pose.rx_deg,
+            ry_deg=cur_pose.ry_deg,
+            rz_deg=cur_pose.rz_deg,
+        ),
+        speed=50,
+        wait=True,
+    )
+
+    # arm.goto_home(speed=50, gripper_m=arm.gripper_close_m)

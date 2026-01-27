@@ -50,7 +50,7 @@ def read_xz_theta_samples_from_txt(txt_path):
     return samples
 
 
-def build_waypoints_from_aligned_samples(
+def xz_build_waypoints_from_aligned_samples(
     samples,
     start_pose,
     theta_in_degrees=False,
@@ -113,6 +113,71 @@ def build_waypoints_from_aligned_samples(
         p.position.x = start_x - dx 
         p.position.y = start_y           # y 固定
         p.position.z = start_z + dz      # z 正向
+
+        p.orientation.x = q[0]
+        p.orientation.y = q[1]
+        p.orientation.z = q[2]
+        p.orientation.w = q[3]
+
+        waypoints.append(p)
+
+    return waypoints
+
+
+def yz_build_waypoints_from_aligned_samples(
+    samples,
+    start_pose,
+    theta_in_degrees=False,
+    theta_axis='x'
+):
+
+    if not samples:
+        raise ValueError("No samples provided.")
+
+    # txt 首点
+    sy0, sz0, _ = samples[0]
+
+    start_x = start_pose.position.x
+    start_y = start_pose.position.y
+    start_z = start_pose.position.z
+
+    # 基准姿态
+    q0 = [
+        start_pose.orientation.x,
+        start_pose.orientation.y,
+        start_pose.orientation.z,
+        start_pose.orientation.w
+    ]
+
+    waypoints = []
+    # 可选：把当前位姿作为第一个 waypoint
+    waypoints.append(start_pose)
+
+    for (sy, sz, theta) in samples:
+        dy = sy - sy0
+        dz = sz - sz0
+
+        # 角度单位
+        if theta_in_degrees:
+            theta = math.radians(theta)
+
+        # 角度 → 四元数
+        if theta_axis == 'y':
+            q_theta = quaternion_from_euler(0.0, theta, 0.0)
+        elif theta_axis == 'z':
+            q_theta = quaternion_from_euler(0.0, 0.0, theta)
+        elif theta_axis == 'x':
+            q_theta = quaternion_from_euler(theta, 0.0, 0.0)
+        else:
+            raise ValueError("theta_axis must be 'x', 'y', or 'z'")
+
+        # 最终姿态 = 起始姿态 ⊗ 角度旋转
+        q = quaternion_multiply(q0, q_theta)
+
+        p = Pose()
+        p.position.x = start_x
+        p.position.y = start_y - dy
+        p.position.z = start_z + dz
 
         p.orientation.x = q[0]
         p.orientation.y = q[1]

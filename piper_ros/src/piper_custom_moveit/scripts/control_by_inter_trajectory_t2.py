@@ -3,8 +3,10 @@ import sys
 import rospy
 import moveit_commander
 from geometry_msgs.msg import Pose
+import matplotlib.pyplot as plt
+import numpy as np
 
-from load_traj import read_xz_theta_samples_from_txt, build_waypoints_from_aligned_samples
+from load_traj import read_xz_theta_samples_from_txt, xz_build_waypoints_from_aligned_samples, yz_build_waypoints_from_aligned_samples
 
 
 # =========================
@@ -13,7 +15,9 @@ from load_traj import read_xz_theta_samples_from_txt, build_waypoints_from_align
 GROUP_NAME = "arm"
 
 # 回零（初始）关节角（按 MoveIt group 的关节顺序）
-HOME_JOINTS = [0.0, 0.866, -0.960, 0.0, 0.182, 1.571]
+XZ_HOME_JOINTS = [0.0, 0.866, -0.960, 0.0, 0.182, 1.571]
+YZ_HOME_JOINTS = [0.0, 0.866, -0.960, 0.0, 0.182, 0.00]
+YZ_HOME_JOINTS_HIGH = [0.0, 0.928, -1.195, 0.0, 0.355, 0.0]
 ZERO_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # HOME
@@ -21,17 +25,18 @@ HOME_VEL_SCALE = 0.4
 HOME_ACC_SCALE = 0.4
 
 # TASK
-TASK_VEL_SCALE = 0.03
-TASK_ACC_SCALE = 0.03
+TASK_VEL_SCALE = 0.1
+TASK_ACC_SCALE = 0.1
 
 # 额外整体放慢倍数（>1 更慢）
 SLOW_DOWN_SCALE = 2.0
 
 # refine is the path to the txt file
-TXT_PATH = "case_4_refine.txt"
+TXT_PATH = "t2c1_refine.txt"
+# TXT_PATH = "t1c4_refine.txt"
 
 # compute_cartesian_path 的插值步长（建议小一点更平滑）
-EEF_STEP = 0.002
+EEF_STEP = 0.005
 JUMP_THRESHOLD = 0.0
 
 # ===== 夹爪参数 =====
@@ -65,7 +70,7 @@ def move_to_home_pose(group):
     group.set_max_velocity_scaling_factor(HOME_VEL_SCALE)
     group.set_max_acceleration_scaling_factor(HOME_ACC_SCALE)
 
-    group.set_joint_value_target(HOME_JOINTS)
+    group.set_joint_value_target(YZ_HOME_JOINTS_HIGH)
 
     plan = group.plan()
     # 兼容不同 MoveIt 版本：plan() 可能返回 tuple 或直接返回 plan
@@ -134,6 +139,107 @@ def wait_enter_or_quit(prompt):
         return False
     return True
 
+def visualize_waypoints_yz(waypoints, title="Waypoints (Y-Z)"):
+    """
+    可视化 Cartesian waypoints 的 Y-Z 投影
+    同时计算相邻路径点的距离统计
+    """
+    ys = np.array([p.position.y for p in waypoints])
+    zs = np.array([p.position.z for p in waypoints])
+
+    # ===== 计算相邻点之间的距离 =====
+    if len(ys) >= 2:
+        dists = np.sqrt(np.diff(ys)**2 + np.diff(zs)**2)
+        mean_dist = np.mean(dists)
+        min_dist = np.min(dists)
+        max_dist = np.max(dists)
+    else:
+        dists = np.array([])
+        mean_dist = min_dist = max_dist = 0.0
+
+    # ===== 可视化 =====
+    plt.figure()
+    plt.plot(ys, zs, 'b.-', label='Waypoints')
+    plt.scatter(ys[0], zs[0], c='g', s=80, label='Start')
+    plt.scatter(ys[-1], zs[-1], c='r', s=80, label='End')
+
+    plt.axis('equal')
+    plt.xlabel('Y')
+    plt.ylabel('Z')
+    plt.grid(True)
+    plt.legend()
+
+    plt.title(
+        f"{title}\n"
+        f"mean Δ={mean_dist:.5f}, min Δ={min_dist:.5f}, max Δ={max_dist:.5f}"
+    )
+
+    plt.show()
+
+    # ===== 同时返回数值，方便你程序里用 =====
+    return mean_dist, min_dist, max_dist, dists
+
+def resample_waypoints_yz(waypoints, step=0.005, min_dist=1e-5):
+    """
+    将 waypoints 在 Y-Z 平面按弧长重采样到近似固定间距 step，并去掉重复点
+    - step: 目标间距（建议 0.005~0.01）
+    - min_dist: 去重阈值（去掉几乎相同的点）
+    注意：姿态保持不变（直接拷贝原 waypoint 的 orientation）
+    """
+    if len(waypoints) < 2:
+        return waypoints
+
+    ys = np.array([p.position.y for p in waypoints])
+    zs = np.array([p.position.z for p in waypoints])
+
+    # 1) 去掉重复/极近点
+    keep = [0]
+    for i in range(1, len(waypoints)):
+        dy = ys[i] - ys[keep[-1]]
+        dz = zs[i] - zs[keep[-1]]
+        if (dy*dy + dz*dz) ** 0.5 >= min_dist:
+            keep.append(i)
+
+    waypoints = [waypoints[i] for i in keep]
+    ys = ys[keep]
+    zs = zs[keep]
+
+    if len(waypoints) < 2:
+        return waypoints
+
+    # 2) 弧长参数
+    d = np.sqrt(np.diff(ys)**2 + np.diff(zs)**2)
+    s = np.concatenate([[0.0], np.cumsum(d)])
+    total = s[-1]
+    if total < step:
+        return waypoints
+
+    s_new = np.arange(0.0, total, step)
+    y_new = np.interp(s_new, s, ys)
+    z_new = np.interp(s_new, s, zs)
+
+    # 3) 生成新的 Pose 列表（orientation 用第一个 waypoint 的，保持不变）
+    q = waypoints[0].orientation
+    x_const = waypoints[0].position.x  # 如果你希望 x 固定
+
+    new_wps = []
+    for y, z in zip(y_new, z_new):
+        p = Pose()
+        p.position.x = float(x_const)
+        p.position.y = float(y)
+        p.position.z = float(z)
+        p.orientation = q
+        new_wps.append(p)
+
+    # 保证终点包含
+    if (abs(new_wps[-1].position.y - waypoints[-1].position.y) +
+        abs(new_wps[-1].position.z - waypoints[-1].position.z)) > 1e-9:
+        p = Pose()
+        p.position = waypoints[-1].position
+        p.orientation = q
+        new_wps.append(p)
+
+    return new_wps
 
 def main():
     moveit_commander.roscpp_initialize(sys.argv)
@@ -151,14 +257,14 @@ def main():
     # if not move_to_zero_pose(group):
     #     return
 
-    # 微微打开夹爪
-    rospy.loginfo("Opening gripper slightly...")
-    move_gripper(
-        gripper_group,
-        GRIPPER_OPEN,
-        vel=GRIPPER_VEL_SCALE,
-        acc=GRIPPER_ACC_SCALE
-    )
+    # # 微微打开夹爪
+    # rospy.loginfo("Opening gripper slightly...")
+    # move_gripper(
+    #     gripper_group,
+    #     GRIPPER_OPEN,
+    #     vel=GRIPPER_VEL_SCALE,
+    #     acc=GRIPPER_ACC_SCALE
+    # )
 
     # 等待人工确认
     if not wait_enter_or_quit("Press ENTER to close gripper, 'q'+ENTER to quit."):
@@ -183,7 +289,25 @@ def main():
         rospy.logerr("No valid samples loaded from txt: %s", TXT_PATH)
         return
 
-    waypoints = build_waypoints_from_aligned_samples(samples, start_pose)
+    waypoints = yz_build_waypoints_from_aligned_samples(samples, start_pose)
+
+    # mean_d, min_d, max_d, dists = visualize_waypoints_yz(waypoints)
+
+    # print("Average spacing:", mean_d)
+    # print("Min spacing:", min_d)
+    # print("Max spacing:", max_d)
+
+    # exit()
+
+    # waypoints = resample_waypoints_yz(waypoints, step=0.005, min_dist=1e-5)
+
+    # mean_d, min_d, max_d, dists = visualize_waypoints_yz(waypoints)
+
+    # print("Average spacing:", mean_d)
+    # print("Min spacing:", min_d)
+    # print("Max spacing:", max_d)
+
+    # exit()
 
     (plan, fraction) = group.compute_cartesian_path(
         waypoints,
@@ -196,8 +320,16 @@ def main():
         rospy.logwarn("Path not fully achievable (fraction<0.99). Try smaller EEF_STEP or check collisions.")
         return
 
-    # 再额外整体放慢
-    plan = slow_down_plan(plan, SLOW_DOWN_SCALE)
+    # # 再额外整体放慢
+    # plan = slow_down_plan(plan, SLOW_DOWN_SCALE)
+    # 规划完 plan 后：
+    plan = group.retime_trajectory(
+        group.get_current_state(),
+        plan,
+        velocity_scaling_factor=TASK_VEL_SCALE,
+        acceleration_scaling_factor=TASK_ACC_SCALE,
+        algorithm="time_optimal_trajectory_generation"  # 有的版本可用
+)
 
     # ===== 轨迹已规划，RViz 中可见 =====
     rospy.loginfo("Trajectory planned and visualized in RViz.")
@@ -214,9 +346,9 @@ def main():
     group.execute(plan, wait=True)
     group.stop()
 
-    rospy.loginfo("Executing cartesian trajectory from txt slowly...")
-    group.execute(plan, wait=True)
-    group.stop()
+    # rospy.loginfo("Executing cartesian trajectory from txt slowly...")
+    # group.execute(plan, wait=True)
+    # group.stop()
 
 
 if __name__ == "__main__":
