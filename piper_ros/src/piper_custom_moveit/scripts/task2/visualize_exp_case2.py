@@ -5,15 +5,18 @@ from matplotlib import pyplot as plt
 # load npz file
 # data = np.load("exp_case_2_circular_results.npz")
 # data = np.load("exp_case_2_sine_results.npz")
-data = np.load("exp_case_2_line_results.npz")
+data = np.load("exp_case_3_C_1.npz")
 
-# print(data.files)  # ['vertices_hist', 'target']
-# print(data['vertices_hist'].shape)  # (T+1, N, 2)
-# print(data['target'].shape)          # (T+1, 2)
+print(data.files)  # ['vertices_hist', 'target']
 
-# print(data['vertices_hist'][0])  # initial vertices
+print(data['verts_hist'].shape)  # (T+1, N, 2)
+print(data['target'].shape)          # (T+1, 2)
 
-vertices_history = data["vertices_hist"]  # shape (T+1, N, 2)
+print(data['verts_hist'][0])  # initial vertices
+
+exit()
+
+vertices_history = data["verts_hist"]  # shape (T+1, N, 2)
 target_curve = data["target"]          # shape (T+1, 2)
 
 vertices_history = vertices_history.reshape(-1, 202)

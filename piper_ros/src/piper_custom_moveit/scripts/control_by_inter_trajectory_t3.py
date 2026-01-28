@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import sys
+
+from sympy import group
 import rospy
 import moveit_commander
 from geometry_msgs.msg import Pose
@@ -20,8 +22,7 @@ YZ_HOME_JOINTS = [0.0, 0.866, -0.960, 0.0, 0.182, 0.00]
 YZ_HOME_JOINTS_HIGH = [0.0, 0.928, -1.195, 0.0, 0.355, 0.0]
 YZ_HOME_JOINTS_HIGHER = [0.0, 1.2125674978230603, -2.1935472571989933, 0.0, 1.0688221806288074, 0.0]
 
-YZ_HOME_JOINTS_480 = [0.0, 1.017247701232375, -1.4614514491574517, 0.0, 0.5315923835724329, 0.0]
-
+YZ_HOME_JOINTS_Z_630 = [0.0, 1.017247701232375, -1.4614514491574517, 0.0, 0.5315923835724329, 0.0]
 ZERO_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # HOME
@@ -29,18 +30,18 @@ HOME_VEL_SCALE = 0.4
 HOME_ACC_SCALE = 0.4
 
 # TASK
-TASK_VEL_SCALE = 0.1
-TASK_ACC_SCALE = 0.1
+TASK_VEL_SCALE = 0.08
+TASK_ACC_SCALE = 0.08
 
 # 额外整体放慢倍数（>1 更慢）
 SLOW_DOWN_SCALE = 2.0
 
 # refine is the path to the txt file
-TXT_PATH = "t3c2_refine.txt"
+TXT_PATH = "t3c1_15.txt"
 # TXT_PATH = "t1c4_refine.txt"
 
 # compute_cartesian_path 的插值步长（建议小一点更平滑）
-EEF_STEP = 0.005
+EEF_STEP = 0.01
 JUMP_THRESHOLD = 0.0
 
 # ===== 夹爪参数 =====
@@ -74,7 +75,7 @@ def move_to_home_pose(group):
     group.set_max_velocity_scaling_factor(HOME_VEL_SCALE)
     group.set_max_acceleration_scaling_factor(HOME_ACC_SCALE)
 
-    group.set_joint_value_target(YZ_HOME_JOINTS_480)
+    group.set_joint_value_target(YZ_HOME_JOINTS_Z_630)
 
     plan = group.plan()
     # 兼容不同 MoveIt 版本：plan() 可能返回 tuple 或直接返回 plan
@@ -183,67 +184,60 @@ def visualize_waypoints_yz(waypoints, title="Waypoints (Y-Z)"):
     # ===== 同时返回数值，方便你程序里用 =====
     return mean_dist, min_dist, max_dist, dists
 
-def resample_waypoints_yz(waypoints, step=0.008, min_dist=1e-5):
+def filter_waypoints_yz(waypoints, min_dist=1e-3):
     """
-    将 waypoints 在 Y-Z 平面按弧长重采样到近似固定间距 step，并去掉重复点
-    - step: 目标间距（建议 0.005~0.01）
-    - min_dist: 去重阈值（去掉几乎相同的点）
-    注意：姿态保持不变（直接拷贝原 waypoint 的 orientation）
+    只在 Y-Z 平面过滤 waypoint：
+    - 相邻点距离 < min_dist 的会被删除
+    - 不生成新点
+    - orientation 完全不修改，随 waypoint 原样保留
     """
     if len(waypoints) < 2:
         return waypoints
 
-    ys = np.array([p.position.y for p in waypoints])
-    zs = np.array([p.position.z for p in waypoints])
+    filtered = [waypoints[0]]
 
-    # 1) 去掉重复/极近点
-    keep = [0]
-    for i in range(1, len(waypoints)):
-        dy = ys[i] - ys[keep[-1]]
-        dz = zs[i] - zs[keep[-1]]
-        if (dy*dy + dz*dz) ** 0.5 >= min_dist:
-            keep.append(i)
+    for p in waypoints[1:]:
+        last = filtered[-1]
 
-    waypoints = [waypoints[i] for i in keep]
-    ys = ys[keep]
-    zs = zs[keep]
+        dy = p.position.y - last.position.y
+        dz = p.position.z - last.position.z
 
-    if len(waypoints) < 2:
-        return waypoints
+        # print('ori:', p.orientation)
 
-    # 2) 弧长参数
-    d = np.sqrt(np.diff(ys)**2 + np.diff(zs)**2)
-    s = np.concatenate([[0.0], np.cumsum(d)])
-    total = s[-1]
-    if total < step:
-        return waypoints
+        if (dy * dy + dz * dz) ** 0.5 >= min_dist:
+            filtered.append(p)   # 原 waypoint，orientation 不动
 
-    s_new = np.arange(0.0, total, step)
-    y_new = np.interp(s_new, s, ys)
-    z_new = np.interp(s_new, s, zs)
+    return filtered
 
-    # 3) 生成新的 Pose 列表（orientation 用第一个 waypoint 的，保持不变）
-    q = waypoints[0].orientation
-    x_const = waypoints[0].position.x  # 如果你希望 x 固定
+def check_waypoints_ik(group, waypoints):
+    """
+    用 MoveGroupCommander 本身来检查每个 waypoint 是否有 IK 解
+    返回：
+      valid_idx   : 有解的 waypoint index
+      invalid_idx : 无解的 waypoint index
+    """
+    valid = []
+    invalid = []
 
-    new_wps = []
-    for y, z in zip(y_new, z_new):
-        p = Pose()
-        p.position.x = float(x_const)
-        p.position.y = float(y)
-        p.position.z = float(z)
-        p.orientation = q
-        new_wps.append(p)
+    # 先存一下当前状态，避免污染
+    group.clear_pose_targets()
 
-    # 保证终点包含
-    if (abs(new_wps[-1].position.y - waypoints[-1].position.y) +
-        abs(new_wps[-1].position.z - waypoints[-1].position.z)) > 1e-9:
-        p = Pose()
-        p.position = waypoints[-1].position
-        p.orientation = q
-        new_wps.append(p)
+    for i, p in enumerate(waypoints):
+        group.set_pose_target(p)
+        plan = group.plan()
 
-    return new_wps
+        # 兼容不同 MoveIt 版本
+        if isinstance(plan, tuple):
+            plan = plan[1]
+
+        if plan and hasattr(plan, "joint_trajectory") and len(plan.joint_trajectory.points) > 0:
+            valid.append(i)
+        else:
+            invalid.append(i)
+
+        group.clear_pose_targets()
+
+    return valid, invalid
 
 def main():
     moveit_commander.roscpp_initialize(sys.argv)
@@ -256,19 +250,19 @@ def main():
     gripper_group = moveit_commander.MoveGroupCommander(GRIPPER_GROUP)
 
     # ===== 功能 1：每次执行前回 HOME（慢慢过去） =====
-    if not move_to_home_pose(group):
-        return
+    # if not move_to_home_pose(group):
+    #     return
     # if not move_to_zero_pose(group):
     #     return
 
-    # # 微微打开夹爪
-    # rospy.loginfo("Opening gripper slightly...")
-    # move_gripper(
-    #     gripper_group,
-    #     GRIPPER_OPEN,
-    #     vel=GRIPPER_VEL_SCALE,
-    #     acc=GRIPPER_ACC_SCALE
-    # )
+    # 微微打开夹爪
+    rospy.loginfo("Opening gripper slightly...")
+    move_gripper(
+        gripper_group,
+        GRIPPER_OPEN,
+        vel=GRIPPER_VEL_SCALE,
+        acc=GRIPPER_ACC_SCALE
+    )
 
     # 等待人工确认
     if not wait_enter_or_quit("Press ENTER to close gripper, 'q'+ENTER to quit."):
@@ -295,23 +289,29 @@ def main():
 
     waypoints = yz_build_waypoints_from_aligned_samples(samples, start_pose)
 
-    mean_d, min_d, max_d, dists = visualize_waypoints_yz(waypoints)
+    # mean_d, min_d, max_d, dists = visualize_waypoints_yz(waypoints)
 
-    print("Average spacing:", mean_d)
-    print("Min spacing:", min_d)
-    print("Max spacing:", max_d)
-
-    # exit()
-
-    waypoints = resample_waypoints_yz(waypoints, step=0.005, min_dist=1e-5)
-
-    mean_d, min_d, max_d, dists = visualize_waypoints_yz(waypoints)
-
-    print("Average spacing:", mean_d)
-    print("Min spacing:", min_d)
-    print("Max spacing:", max_d)
+    # print("Average spacing:", mean_d)
+    # print("Min spacing:", min_d)
+    # print("Max spacing:", max_d)
 
     # exit()
+
+    waypoints = filter_waypoints_yz(waypoints, min_dist=1e-3)
+
+    # mean_d, min_d, max_d, dists = visualize_waypoints_yz(waypoints)
+
+    # print("Average spacing:", mean_d)
+    # print("Min spacing:", min_d)
+    # print("Max spacing:", max_d)
+
+    # # exit()
+    # print("Before IK check, total waypoints:", len(waypoints))
+    # # robot = moveit_commander.RobotCommander()
+    # valid_idx, invalid_idx = check_waypoints_ik(group, waypoints)
+    # waypoints = [waypoints[i] for i in valid_idx]
+    # print("After IK check, valid waypoints:", len(waypoints))
+    # print('percentage of valid waypoints:', len(waypoints) / (len(valid_idx) + len(invalid_idx)) * 100)
 
     (plan, fraction) = group.compute_cartesian_path(
         waypoints,
@@ -320,7 +320,7 @@ def main():
     )
 
     rospy.loginfo("Cartesian path fraction: %.3f", fraction)
-    if fraction < 0.99:
+    if fraction < 0.5:
         rospy.logwarn("Path not fully achievable (fraction<0.99). Try smaller EEF_STEP or check collisions.")
         return
 

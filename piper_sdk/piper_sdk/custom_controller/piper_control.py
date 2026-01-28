@@ -389,7 +389,9 @@ if __name__ == "__main__":
     # print("Current control mode:", arm.get_ctrl_mode_str())
     # print('status:', arm.status)
 
-    # arm.set_ctrl_mode2can()
+    arm.set_ctrl_mode2can()
+
+    exit()
 
     arm.update()
     cur_joint = arm.joint_rad
@@ -401,7 +403,7 @@ if __name__ == "__main__":
 
     arm.gripper_open()
 
-    exit()
+    # exit()
 
     arm.move_end_pose(
         EndPose(
